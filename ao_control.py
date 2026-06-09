@@ -16,10 +16,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter, PillowWriter
 
 
-# add
-from torch_npu.contrib import transfer_to_npu
-
-
 # ========================================================
 # 1. 动态自适应光学环境类(Dynamic AO Environment)
 # ========================================================
@@ -58,21 +54,33 @@ class DynamicAOEnvironment:
         # 创建泽尼克基底（从Noll索引2开始，排除1-Piston）
         self.zernike_basis = hc.make_zernike_basis(num_zernike, self.pupil_diameter, self.pupil_grid, starting_mode=2)
 
-        # # 配置真实连续面形变形镜(高斯影响函数)
-        # num_actuators_across = 11   # 沿口径方向11x11致动器
-        # actuator_spacing = self.pupil_diameter / num_actuators_across
-        # # 生成高斯影响函数（表面高度基，单位：米）
-        # influence_functions = hc.make_gaussian_influence_functions(
-        #     pupil_grid=self.pupil_grid,
-        #     num_actuators_across_pupil=num_actuators_across,
-        #     actuator_spacing=actuator_spacing
-        # )
-        # self.dm = hc.DeformableMirror(influence_functions)
-        # # 获取泽尼克矩阵
-        # zernike_matrix = self.zernike_basis.transformation_matrix
-        # influence_matrix = self.dm.influence_functions.transformation_matrix
-        # pinv_influence = hc.inverse_tikhonov(influence_matrix, rcond=1e-3)
-        # self.zernike_to_dm_matrix = pinv_influence.dot(zernike_matrix)
+        # 配置真实连续面形变形镜（高斯影响函数）。
+        # 神经网络仍预测残差泽尼克相位系数（单位：rad），控制端将其转换为
+        # DM 物理表面高度命令（单位：m），再通过 HCIPY 的 DeformableMirror
+        # 参与波前传播；不再使用理想相位屏/Apodizer 直接叠加相位。
+        num_actuators_across = 11   # 沿口径方向 11x11 致动器
+        actuator_spacing = self.pupil_diameter / num_actuators_across
+        influence_functions = hc.make_gaussian_influence_functions(
+            pupil_grid=self.pupil_grid,
+            num_actuators_across_pupil=num_actuators_across,
+            actuator_spacing=actuator_spacing
+        )
+        self.dm = hc.DeformableMirror(influence_functions)
+
+        # 预计算“泽尼克相位系数 -> DM 致动器高度”的最小二乘映射。
+        # HCIPY 中反射式 DM 施加的相位为 4*pi*surface/wavelength，
+        # 因此目标相位先换算为目标表面高度：surface = phase*wavelength/(4*pi)。
+        mask = self.aperture > 0
+        zernike_matrix = np.asarray(self.zernike_basis.transformation_matrix[mask, :])
+        influence_matrix = self.dm.influence_functions.transformation_matrix[mask, :]
+        if hasattr(influence_matrix, "toarray"):
+            influence_matrix = influence_matrix.toarray()
+        else:
+            influence_matrix = np.asarray(influence_matrix)
+        pinv_influence = hc.inverse_tikhonov(influence_matrix, rcond=1e-3)
+        self.zernike_to_dm_matrix = pinv_influence.dot(
+            zernike_matrix * (self.wavelength / (4.0 * np.pi))
+        )
 
         # 配置离焦相差（用于生成相差多样性所需的离焦图像，采用Noll 4 Defocus）
         defocus_basis = hc.make_zernike_basis(3, self.pupil_diameter, self.pupil_grid, starting_mode=4)
@@ -80,8 +88,8 @@ class DynamicAOEnvironment:
 
         # 初始化扩展目标
         self.extended_object = self._generate_extended_target()
-        # 初始化校正相位屏相位
-        self.current_phase_commands = np.zeros(self.num_zernike)
+        # 初始化 DM 控制量：以泽尼克相位系数表示，随后映射到物理致动器高度
+        self.current_dm_zernike_commands = np.zeros(self.num_zernike)
 
     def _generate_extended_target(self):
         """生成一个用于仿真的扩展目标图像（十字靶标）"""
@@ -92,34 +100,30 @@ class DynamicAOEnvironment:
         obj[r-2:r+2, c-12:c+12] = 1.0
         return obj / np.sum(obj)
 
-    def step(self, phase_commands=None):
+    def step(self, dm_commands=None):
         """
         环境向前推进一个时间步长
-        :param phase_commands: 相位屏校正控制量（泽尼克模式系数向量）
+        :param dm_commands: DM 校正控制量（泽尼克相位系数向量，单位 rad）
         :return: observation（图像及相位网格），truth（波前真实泽尼克系数）
         """
         # 大气演化
         self.t += self.dt
         self.atmosphere.evolve_until(self.t)
 
-        # # 更新变形镜
-        # if dm_commands is not None:
-        #     self.current_zernike_commands = dm_commands
-        # physical_actuators = self.zernike_to_dm_matrix.dot(self.current_zernike_commands)
-        # self.dm.actuators = physical_actuators
+        # 更新变形镜：将模型预测/控制律累计得到的泽尼克相位系数，
+        # 转换为真实 DM 致动器表面高度命令并应用于物理传播链路。
+        if dm_commands is not None:
+            self.current_dm_zernike_commands = np.asarray(dm_commands, dtype=float)
+        physical_actuators = self.zernike_to_dm_matrix.dot(self.current_dm_zernike_commands)
+        self.dm.actuators = physical_actuators
 
-        # 更新相位屏指令
-        if phase_commands is not None:
-            self.current_phase_commands = phase_commands
-
-        # 校正相位
-        correction_phase = self.zernike_basis.linear_combination(self.current_phase_commands)
-        phase_screen = hc.Apodizer(np.exp(1j * correction_phase))
-
-        # 构建入射波前并物理传播
+        # 构建入射波前并物理传播：大气扰动后由 DM 反射校正。
         wf_in = hc.Wavefront(self.aperture, self.wavelength)
         wf_perturbed = self.atmosphere(wf_in)
-        wf_corrected = phase_screen(wf_perturbed)
+        wf_corrected = self.dm(wf_perturbed)
+
+        # DM 实际施加的相位（受影响函数拟合精度与致动器排布限制）
+        correction_phase = self.dm.phase_for(self.wavelength)
 
         # 提取真实的、未被2pi截断的连续物理相位（Unwrapped Phase)
         atmo_phase = self.atmosphere.phase_for(self.wavelength)
@@ -179,7 +183,7 @@ class DynamicAOEnvironment:
             'open_psf_infocus': open_psf_infocus,
             'open_psf_defocus': open_psf_defocus,
             'atmosphere_phase': atmosphere_phase_2d,
-            'screen_phase': correction_phase_2d,
+            'dm_phase': correction_phase_2d,
             'residual_phase': residual_phase_2d
         }
 
@@ -192,8 +196,8 @@ class DynamicAOEnvironment:
     def reset(self):
         self.t = 0.0
         self.atmosphere.reset()
-        self.current_phase_commands = np.zeros(self.num_zernike)
-        # self.dm.actuators = np.zeros(self.dm.num_actuators)
+        self.current_dm_zernike_commands = np.zeros(self.num_zernike)
+        self.dm.flatten()
 
 # ========================================================
 # 2. 神经网络交互接口（Neural Network Predictor）
@@ -272,12 +276,12 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
     out_dir = save_path
     os.makedirs(out_dir, exist_ok=True)
 
-    # 维持一个模拟的相位屏当前指令
-    screen_commands = np.zeros(env.num_zernike)
+    # 维持一个模拟的 DM 当前指令（泽尼克相位系数）
+    dm_commands = np.zeros(env.num_zernike)
 
     for frame in range(num_frames):
-        # 推进环境：此时相机拍到的，是叠加了screen_commands后的残差光场
-        obs, truth = env.step(phase_commands=screen_commands)
+        # 推进环境：此时相机拍到的，是经过 DM 校正后的残差光场
+        obs, truth = env.step(dm_commands=dm_commands)
         idx = frame + 1
 
         Image.fromarray(_to_uint8_image(obs['psf_infocus']), mode='L').save(
@@ -298,25 +302,25 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
         if rand_scenario < 0.2:
             # 场景A（20%概率）：纯开环状态
             # 强制指令归零，让模型学习应对原始的大尺度大气湍流
-            screen_commands = np.zeros(env.num_zernike)
+            dm_commands = np.zeros(env.num_zernike)
         elif rand_scenario < 0.6:
             # 场景B（40%概率）：模拟健康的闭环收敛中间态
             # 利用当前真值做一次带随机增益的控制，制造各种微小残差的图像
             gain = np.random.uniform(0.3,0.9)
             # 理想控制律：新指令 = 旧指令 - 增益*测量的残差误差
-            screen_commands = screen_commands - gain * truth['residual_zernike']
+            dm_commands = dm_commands - gain * truth['residual_zernike']
         elif rand_scenario < 0.8:
             # 场景C（20%概率）：模拟预测错误/发散边缘
             # 故意注入随机的泽尼克噪声，强迫模型见识“越校越歪”的情况并学习纠偏
             noise = np.random.normal(0,0.4,env.num_zernike)
             gain = np.random.uniform(0.1,0.5)
-            screen_commands = screen_commands - gain * truth['residual_zernike'] + noise
+            dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
         else:
             # 场景D（20%概率）：彻底发散与灾难恢复（Loos of Lock）
-            # 无视当前收敛状态，直接向相位屏注入幅值极大的随机畸变（标准差1.5）
+            # 无视当前收敛状态，直接向DM注入幅值极大的随机畸变（标准差1.5）
             # 此时焦面上的图像大概率已经完全碎裂，强迫模型学习如何从混沌中找回梯度
             massive_chaos = np.random.normal(0,1.5,env.num_zernike)
-            screen_commands = massive_chaos
+            dm_commands = massive_chaos
 
         if (frame + 1) % 100 == 0:
             print(f"已生成{frame + 1} / {num_frames}帧数据...")
@@ -329,8 +333,8 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
 def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_name="ao_interaction_verification.mp4"):
     """运行闭环系统，与神经网络模型进行实时交互，并保存整个物理状态视频"""
     env = DynamicAOEnvironment(pupil_grid_size=128, num_zernike=15)
-    # 连续面形变形镜的致动器命令
-    phase_commands = np.zeros(env.num_zernike)
+    # 连续面形变形镜的控制命令（泽尼克相位系数，内部会映射为致动器高度）
+    dm_commands = np.zeros(env.num_zernike)
 
 
     # 构建2x3画布展示各个物理环节
@@ -341,16 +345,16 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
     res_rms_history = []
 
     # 预加载首帧设定图像参数
-    obs, truth = env.step(phase_commands=phase_commands)
+    obs, truth = env.step(dm_commands=dm_commands)
 
     # 第一行：相位环路与控制指标
     im_atmo = axes[0,0].imshow(obs['atmosphere_phase'], cmap='RdBu', vmin=-50, vmax=50)
     axes[0,0].set_title("1. Input Atmosphere Phase\n(Continues Disturbance)")
     fig.colorbar(im_atmo, ax=axes[0,0])
 
-    im_screen = axes[0,1].imshow(obs['screen_phase'], cmap='RdBu', vmin=-20, vmax=20)
-    axes[0,1].set_title("2. Phase Screen Phase\n(Real-time Apodizer)")
-    fig.colorbar(im_screen, ax=axes[0,1])
+    im_dm = axes[0,1].imshow(obs['dm_phase'], cmap='RdBu', vmin=-20, vmax=20)
+    axes[0,1].set_title("2. Deformable Mirror Phase\n(Physical DM)")
+    fig.colorbar(im_dm, ax=axes[0,1])
 
     im_res = axes[0,2].imshow(obs['residual_phase'], cmap='RdBu', vmin=-50, vmax=50)
     axes[0,2].set_title("3. Residual Phase\n(Corrected Wavefront)")
@@ -400,7 +404,7 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
 
     for step in range(num_steps):
         # 1. 环境更新：推进大气的状态，并将上一帧计算的指令发送给变形镜
-        obs, truth = env.step(phase_commands=phase_commands)
+        obs, truth = env.step(dm_commands=dm_commands)
 
         img_in, img_de = obs['img_infocus'], obs['img_defocus']
         psf_in, psf_de = obs['psf_infocus'], obs['psf_defocus']
@@ -416,7 +420,7 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
             pred_residual = truth['residual_zernike'] * 0.70 + np.random.normal(0, 0.04, env.num_zernike)
 
         # 3. 实时控制律计算
-        phase_commands = phase_commands - loop_gain * pred_residual
+        dm_commands = dm_commands - loop_gain * pred_residual
 
         # 计算开闭环波前统计标准差（RMS）评估性能
         open_rms = np.std(truth['open_loop_zernike'])
@@ -426,7 +430,7 @@ def do_closed_loop_verification(nn_sensor, num_steps=120, loop_gain=0.3, video_n
 
         # 4. 刷新视频当前帧的图像数据
         im_atmo.set_data(obs['atmosphere_phase'])
-        im_screen.set_data(obs['screen_phase'])
+        im_dm.set_data(obs['dm_phase'])
         im_res.set_data(obs['residual_phase'])
         line_open.set_data(range(len(open_rms_history)), open_rms_history)
         line_res.set_data(range(len(res_rms_history)), res_rms_history)
