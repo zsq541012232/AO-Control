@@ -352,14 +352,22 @@ class AOControlDRLEnv(gym.Env):
 
 
 # ========================================================
-# 3. 自定义回调用于监控训练
+# 3. 自定义回调用于监控训练与在线生成观测视频
 # ========================================================
-class AOControlCallback(BaseCallback):
-    """训练回调，记录关键指标"""
-    def __init__(self, verbose=0):
+class AOVideoGenerationCallback(BaseCallback):
+    """训练回调，在训练（learn）的每一步捕获环境状态并渲染可视化视频帧"""
+    def __init__(self, num_steps, algorithm_name, reward_type,verbose=0):
         super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
+        self.num_steps = num_steps
+        self.algorithm_name = algorithm_name
+        self.reward_type = reward_type
+        self.frames_bytes = []
+        self.reward_history = []
+        self.residual_rms_history = []
+        self.step_count = 0
+
+        # 初始化独立画布
+        self.fig = plt.figure(figsize=(15,10), dpi=100)
 
     def _on_step(self) -> bool:
         return True
