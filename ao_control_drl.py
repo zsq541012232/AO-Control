@@ -448,6 +448,25 @@ class AOVideoGenerationCallback(BaseCallback):
         plt.close(self.fig)
 
 
+class ZernikeFeatureExtractor(BaseFeaturesExtractor):
+    """
+    使用model.py中的ZernikeNet作为特征提取主干
+    将输入的焦内/离焦双通道图像映射为SB3策略网络所需的潜向量(Latent Vector)
+    """
+    def __init__(self, observation_space: gym.spaces.Box, feature_dim: int = 512, weight_path=None):
+        super().__init__(observation_space, feature_dim)
+        in_channels = observation_space.shape[0]
+        self.extractor = ZernikeNet(
+            num_outputs=feature_dim,
+            in_channels=in_channels,
+            weight_path=weight_path
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.extractor(observations)
+
+   
+
 # ========================================================
 # 4. 深度强化学习训练系统
 # ========================================================
@@ -455,7 +474,7 @@ class DRLAOControlSystem:
     """深度强化学习自适应光学控制系统"""
 
     def __init__(self, num_zernike=15, pupil_grid_size=128, algorithm='PPO',
-                 reward_type='strehl', model_dir='./drl_models', log_dir='./drl_logs'):
+                 reward_type='strehl', model_dir='./drl_models'):
         """
         初始化DRL系统
         :param num_zernike: 泽尼克模式数
@@ -463,18 +482,15 @@ class DRLAOControlSystem:
         :param algorithm: DRL算法 ('PPO', 'SAC', 'TD3', 'DDPG', 'RecurrentPPO', 'TQC')
         :param reward_type: 奖励类型
         :param model_dir: 模型保存目录
-        :param log_dir: 日志目录
         """
         self.num_zernike = num_zernike
         self.pupil_grid_size = pupil_grid_size
         self.algorithm = algorithm
         self.reward_type = reward_type
         self.model_dir = model_dir
-        self.log_dir = log_dir
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         Path(self.model_dir).mkdir(parents=True, exist_ok=True)
-        Path(self.log_dir).mkdir(parents=True, exist_ok=True)
 
         self.env = None
         self.model = None
@@ -486,7 +502,10 @@ class DRLAOControlSystem:
         logger.info(f"Creating model with algorithm: {self.algorithm}")
 
         policy_kwargs = dict(
-            net_arch=[256, 256],
+            feature_extractor_class=ZernikeFeatureExtractor,
+            feature_extractor_kwargs=dict(feature_dim=512, weight_path=None),
+            normalize_images=False,
+            net_arch=dict(pi=[256, 256], vf=[256,256]),
             activation_fn=torch.nn.ReLU
         )
 
@@ -503,7 +522,6 @@ class DRLAOControlSystem:
                 clip_range=0.2,
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         elif self.algorithm == 'SAC':
             model = SAC(
@@ -516,7 +534,6 @@ class DRLAOControlSystem:
                 target_entropy='auto',
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         elif self.algorithm == 'TD3':
             model = TD3(
@@ -529,7 +546,6 @@ class DRLAOControlSystem:
                 target_policy_noise=0.2,
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         elif self.algorithm == 'DDPG':
             model = DDPG(
@@ -540,7 +556,6 @@ class DRLAOControlSystem:
                 batch_size=64,
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         elif self.algorithm == 'RecurrentPPO':
             model = RecurrentPPO(
@@ -553,7 +568,6 @@ class DRLAOControlSystem:
                 gamma=0.99,
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         elif self.algorithm == 'TQC':
             model = TQC(
@@ -564,7 +578,6 @@ class DRLAOControlSystem:
                 batch_size=64,
                 device=self.device,
                 verbose=1,
-                tensorboard_log=self.log_dir
             )
         else:
             raise ValueError(f"Unknown algorithm: {self.algorithm}")
@@ -645,7 +658,7 @@ class DRLAOControlSystem:
         std_reward = np.std(episode_rewards)
         return mean_reward, std_reward
 
-    def observe_trained_model(self, model_path, num_steps=300, video_name="ao_drl_observation.mp4",
+    def observe_trained_model(self, model_path=None, num_steps=300, video_name="ao_drl_observation.mp4",
                               fps=30):
         """
         模式二：观测模式
@@ -655,8 +668,6 @@ class DRLAOControlSystem:
         :param video_name: 视频输出名
         :param fps: 视频帧率
         """
-        logger.info(f"Loading model from {model_path}")
-        
         # 创建环境（启用rgb_array渲染）
         env = AOControlDRLEnv(
             num_zernike=self.num_zernike,
@@ -667,87 +678,32 @@ class DRLAOControlSystem:
         )
 
         # 加载模型
-        algo_class = self._get_algorithm_class()
-        model = algo_class.load(model_path, env=env, device=self.device)
+        if model_path is not None and os.path.exists(model_path):
+            algo_class = self._get_algorithm_class()
+            self.model = algo_class.load(model_path, env=env, device=self.device)
+        else:
+            self.model = self._create_model(env)
 
-        logger.info("Starting observation mode...")
-        obs, _ = env.reset()
+        video_callback = AOVideoGenerationCallback(
+            num_steps=num_steps,
+            algorithm_name=self.algorithm,
+            reward_type=self.reward_type
+        )
 
-        # 构建画布
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10), dpi=100)
-        fig.suptitle(f"AO Control DRL Observation - {self.algorithm} ({self.reward_type})",
-                     fontsize=16)
 
-        frames_bytes = []
-        rewards_history = []
-        residual_rms_history = []
-
-        for step in range(num_steps):
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, _ = env.step(action)
-
-            if env.frame_buffer:
-                frame_data = env.frame_buffer[-1]
-                frame_obs = frame_data['obs']
-                frame_truth = frame_data['truth']
-                frame_reward = frame_data['reward']
-                frame_dm = frame_data['dm_commands']
-
-                rewards_history.append(frame_reward)
-                residual_rms = np.sqrt(np.mean(frame_truth['residual_zernike'] ** 2))
-                residual_rms_history.append(residual_rms)
-
-                # 清空子图
-                for ax in axes.flat:
-                    ax.clear()
-
-                # 绘制
-                im1 = axes[0, 0].imshow(frame_obs['atmosphere_phase'], cmap='RdBu')
-                axes[0, 0].set_title("Atmosphere Phase")
-                plt.colorbar(im1, ax=axes[0, 0])
-
-                im2 = axes[0, 1].imshow(frame_obs['dm_phase'], cmap='RdBu')
-                axes[0, 1].set_title("DM Correction Phase")
-                plt.colorbar(im2, ax=axes[0, 1])
-
-                im3 = axes[0, 2].imshow(frame_obs['residual_phase'], cmap='RdBu')
-                axes[0, 2].set_title("Residual Phase")
-                plt.colorbar(im3, ax=axes[0, 2])
-
-                im4 = axes[1, 0].imshow(frame_obs['psf_infocus'], cmap='inferno')
-                axes[1, 0].set_title(f"PSF In-focus (Reward: {frame_reward:.4f})")
-                plt.colorbar(im4, ax=axes[1, 0])
-
-                im5 = axes[1, 1].imshow(frame_obs['psf_defocus'], cmap='inferno')
-                axes[1, 1].set_title("PSF Defocus")
-                plt.colorbar(im5, ax=axes[1, 1])
-
-                # 性能曲线
-                axes[1, 2].plot(rewards_history, 'b-', label='Reward', alpha=0.7)
-                axes[1, 2].plot(residual_rms_history, 'r--', label='Residual RMS', alpha=0.7)
-                axes[1, 2].set_title("Performance Metrics")
-                axes[1, 2].set_xlabel("Step")
-                axes[1, 2].legend()
-                axes[1, 2].grid(True)
-
-                plt.tight_layout()
-                fig.canvas.draw()
-                width, height = fig.canvas.get_width_height()
-                frames_bytes.append(bytes(fig.canvas.buffer_rgba()))
-
-                logger.info(f"Step {step + 1}/{num_steps}: Reward={frame_reward:.4f}, "
-                           f"Residual RMS={residual_rms:.4f}")
-
-            if terminated or truncated:
-                break
-
-        plt.close(fig)
+        self.model.learn(total_timesteps=num_steps, callback=video_callback, reset_num_timesteps=True)
+        frames_bytes = video_callback.frames_bytes
+        width, height = video_callback.width, video_callback.height
+        
         logger.info(f"Captured {len(frames_bytes)} frames")
 
         # 编码视频
         if frames_bytes:
             self._encode_video(frames_bytes, video_name, width, height, fps)
-
+        online_model_path = os.path.join(self.model_dir, f"online_trained_{self.algorithm}.zip")
+        self.model.save(online_model_path)
+        logger.info(f"Online trained model saved to : {online_model_path}")
+        
         return video_name
 
     def _get_algorithm_class(self):
@@ -796,8 +752,7 @@ def main_parallel_training():
         pupil_grid_size=128,
         algorithm='PPO',  # 可选: 'PPO', 'SAC', 'TD3', 'DDPG', 'RecurrentPPO', 'TQC'
         reward_type='hybrid',  # 可选: 'strehl', 'mse_residual', 'hybrid'
-        model_dir='./drl_models',
-        log_dir='./drl_logs'
+        model_dir='./drl_models'
     )
 
     best_model = system.train_parallel(
@@ -810,21 +765,21 @@ def main_parallel_training():
     return best_model
 
 
-def main_observation_mode(model_path):
+def main_observation_mode(model_path=None, algorithm='PPO', num_zernike=15, reward_type='hybrid', num_steps=100):
     """观测模式示例"""
     logger.info("=== Starting Observation Mode ===")
 
     system = DRLAOControlSystem(
-        num_zernike=15,
+        num_zernike=nun_zernike,
         pupil_grid_size=128,
-        algorithm='PPO',
-        reward_type='hybrid',
+        algorithm=algorithm,
+        reward_type=reward_type,
         model_dir='./drl_models'
     )
 
     video_path = system.observe_trained_model(
         model_path=model_path,
-        num_steps=500,
+        num_steps=nun_steps,
         video_name='ao_drl_observation.mp4',
         fps=30
     )
@@ -837,23 +792,13 @@ if __name__ == "__main__":
     import sys
 
     # 模式一：并行训练
-    if len(sys.argv) > 1 and sys.argv[1] == 'train':
-        best_model_path = main_parallel_training()
-        print(f"\nBest model saved at: {best_model_path}")
-        print("To run observation mode, use: python ao_control_drl.py observe <model_path>")
+    # best_model_path = main_parallel_training()
 
     # 模式二：观测
-    elif len(sys.argv) > 2 and sys.argv[1] == 'observe':
-        model_path = sys.argv[2]
-        video_path = main_observation_mode(model_path)
-        print(f"\nObservation video saved at: {video_path}")
-
-    else:
-        print("Usage:")
-        print("  Parallel Training Mode (high-efficiency, no video):")
-        print("    python ao_control_drl.py train")
-        print("\n  Observation Mode (with video generation):")
-        print("    python ao_control_drl.py observe <model_path>")
-        print("\nExample:")
-        print("  python ao_control_drl.py train")
-        print("  python ao_control_drl.py observe ./drl_models/best_model_PPO.zip")
+      video_path = main_observation_mode(
+          algorithm='PPO',
+          num_zernike=15,
+          reward_type='hybrid',
+          num_steps=1000
+      )
+    
