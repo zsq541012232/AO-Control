@@ -19,6 +19,10 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
 from stable_baselines3 import PPO, SAC, TD3, DDPG
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch.nn as nn
+from model import ZernikeNet
+
 from sb3_contrib import RecurrentPPO, QRDQN, TQC
 from pathlib import Path
 import logging
@@ -39,8 +43,8 @@ class DynamicAOEnvironment:
         :param focal_num_airy: 焦面网格大小（Airy盘半径）
         :param num_zernike: 考虑的泽尼克模式数量（排除Piston）
         """
-        self.wavelength = 1e-6
-        self.pupil_diameter = 1.0
+        self.wavelength = 1e-6  # 仿真波长：1微米
+        self.pupil_diameter = 1.0   # 望远镜瞳径：1米
         self.num_zernike = num_zernike
 
         # 创建瞳面网格与孔径
@@ -53,14 +57,14 @@ class DynamicAOEnvironment:
         self.propagator = hc.FraunhoferPropagator(self.pupil_grid, self.focal_grid)
 
         # 配置大气扰动
-        fried_parameter = 0.06
-        outer_scale = 20.0
-        velocity = 10.0
+        fried_parameter = 0.06  # 弗里德参数 r0 = 6 cm
+        outer_scale = 20.0   # 大气外尺度 L0 = 20 m
+        velocity = 10.0    # 风速：10 m/s
         Cn_squared = hc.Cn_squared_from_fried_parameter(fried_parameter, 500e-9)
         self.atmosphere = hc.InfiniteAtmosphericLayer(self.pupil_grid, Cn_squared, outer_scale, velocity)
 
         self.t = 0.0
-        self.dt = 0.004
+        self.dt = 0.004    # 时间步长：4ms
 
         # 创建泽尼克基底
         self.zernike_basis = hc.make_zernike_basis(num_zernike, self.pupil_diameter, self.pupil_grid, starting_mode=2)
