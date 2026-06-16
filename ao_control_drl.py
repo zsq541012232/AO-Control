@@ -368,12 +368,49 @@ class AOVideoGenerationCallback(BaseCallback):
 
         # 初始化独立画布
         self.fig = plt.figure(figsize=(15,10), dpi=100)
+        self.width, self.height = self.fig.canvas.get_width_height()
+
+        self.fig.suptitle(f"AO Control DRL Training & Observation - {self.algorithm_name} ({self.reward_type})",
+                          fontsize=16)
+        self.axes = self.fig.subplots(2, 3)
+
+        self.im1 = self.axes[0, 0].imshow(np.zeros(128,128), cmap='RdBu', vmin=-40, vmax=40)
+        self.axes[0, 0].set_title("Atmosphere Phase")
+        plt.colorbar(self.im1, ax=self.axes[0, 0])
+
+        self.im2 = self.axes[0, 1].imshow(np.zeros(128,128), cmap='RdBu', vmin=-10, vmax=10)
+        self.axes[0, 1].set_title("DM Correction Phase")
+        plt.colorbar(self.im2, ax=self.axes[0, 1])
+
+        self.im3 = self.axes[0, 2].imshow(np.zeros(128,128), cmap='RdBu', vmin=-40, vmax=40)
+        self.axes[0, 2].set_title("Residual Phase")
+        plt.colorbar(self.im3, ax=self.axes[0, 2])
+
+        self.psf_in = self.axes[1, 0].imshow(np.zeros(128,128), cmap='inferno')
+        self.axes[1, 0].set_title("PSF In-Focus")
+        plt.colorbar(self.psf_in, ax=self.axes[1, 0])
+
+        self.psf_de = self.axes[1, 1].imshow(np.zeros(128,128), cmap='inferno')
+        self.axes[1, 1].set_title("PSF Defocus")
+        plt.colorbar(self.psf_de, ax=self.axes[1, 1])
+
+        # 性能曲线
+        self.line_reward, = self.axes[1, 2].plot([], [], 'b-', label='Reward', alpha=0.7)
+        self.mse, = self.axes[1, 2].plot([], [], 'r--', label='Residual RMS', alpha=0.7)
+        self.axes[1, 2].set_title("Performance Metrics")
+        self.axes[1, 2].set_xlim(0, num_steps)
+        self.axes[1, 2].set_xlabel("Step")
+        self.axes[1, 2].set_ylim(-3.0, 3.0)
+        self.axes[1, 2].legend(loc='upper right')
+        self.axes[1, 2].grid(True)
+
+        self.fig.tight_layout()
 
     def _on_step(self) -> bool:
         return True
 
     def _on_training_end(self) -> None:
-        pass
+        plt.close(self.fig)
 
 
 # ========================================================
