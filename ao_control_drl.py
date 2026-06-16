@@ -246,10 +246,9 @@ class AOControlDRLEnv(gym.Env):
     def _compute_strehl_ratio(self, psf):
         """计算斯特列尔比"""
         psf_norm = self._normalize_image(psf)
-        peak = np.max(psf_norm)
         encircled_energy = np.sum(psf_norm)
         if encircled_energy > 0:
-            strehl = peak / encircled_energy
+            strehl = 1.0 / encircled_energy
         else:
             strehl = 0.0
         return np.clip(strehl, 0, 1)
@@ -266,28 +265,28 @@ class AOControlDRLEnv(gym.Env):
             # 增加对改进的激励
             if self.prev_strehl is not None:
                 improvement = strehl - self.prev_strehl
-                reward += 0.5 * np.tanh(improvement / 0.01)
+                reward += 10.0 * improvement
             self.prev_strehl = strehl
 
         elif self.reward_type == 'mse_residual':
             # 基于残差波前MSE的奖励
             residual_rms = np.sqrt(np.mean(residual_zernike ** 2))
             # 反向MSE：RMS越小，奖励越大
-            reward = np.exp(-residual_rms)
+            reward = 1 / (1 + residual_rms)
             if self.prev_residual_rms is not None:
                 improvement = self.prev_residual_rms - residual_rms
-                reward += 0.5 * np.tanh(improvement / 0.01)
+                reward += 10.0 * improvement
             self.prev_residual_rms = residual_rms
 
         elif self.reward_type == 'hybrid':
             # 混合奖励：结合斯特列尔比和残差波前
             strehl = self._compute_strehl_ratio(psf_infocus)
             residual_rms = np.sqrt(np.mean(residual_zernike ** 2))
-            norm_rms = np.exp(-residual_rms)
+            norm_rms = 1 / (1 + residual_rms)
             reward = 0.6 * strehl + 0.4 * norm_rms
             if self.prev_strehl is not None:
                 improvement_s = strehl - self.prev_strehl
-                reward += 0.3 * np.tanh(improvement_s / 0.01)
+                reward += 10.0 * improvement_s
             self.prev_strehl = strehl
             self.prev_residual_rms = residual_rms
         else:
