@@ -407,6 +407,41 @@ class AOVideoGenerationCallback(BaseCallback):
         self.fig.tight_layout()
 
     def _on_step(self) -> bool:
+        # 从SB3的Training_env（通常是被包裹的VecEnv）中获取原始环境实例
+        env = self.training_env.envs[0]
+
+        if hasattr(env, 'frame_buffer') and env.frame_buffer:
+            frame_data = env.frame_buffer[-1]
+            frame_obs = frame_data['obs']
+            frame_truth = frame_data['truth']
+            frame_reward = frame_data['reward']
+
+            self.rewards_history.append(frame_reward)
+            residual_rms = np.sqrt(np.mean(frame_truth['residual_zernike'] ** 2))
+            self.residual_rms_history.append(residual_rms)
+
+            # 刷新视频当前帧的图像数据
+            self.im1.set_data(frame_obs['atmosphere_phase'])
+            self.im2.set_data(frame_obs['dm_phase'])
+            self.im3.set_data(frame_obs['residual_phase'])
+            self.psf_in.set_data(frame_obs['psf_infocus'])
+            self.psf_de.set_data(frame_obs['psf_defocus'])
+            self.line_reward.set_data(range(len(self.reward_history)), self.reward_history)
+            self.linr_mse.set_data(range(len(self.residual_rms_history)), self.residual_rms_history)
+
+            self.psf_in.set_clim(vmin=0, vmax=frame_obs['psf_infocus'].max())
+            self.psf_de.set_clim(vmin=0, vmax=frame_obs['psf_defocus'].max())
+
+            self.fig.canvas.draw()
+            self.frame_bytes.append(bytes(self.fig.canvas.buffer_rgba()))
+
+            self.step_count += 1
+            if self.step_count % 10 == 0 or self.step_count == self.num_steps:
+                logger.info(f"Step {self.step_count}/{self.num_steps}:Reward={frame_reward:.4f},"
+                            f"Residual RMS={residual_rms:.4f}")
+            if self.step_count >= self.num_steps:
+                logger.info(f"已达到设定的最大观测步数({self.num_steps}步)，正在强行截断并生成视频...")
+                return False
         return True
 
     def _on_training_end(self) -> None:
