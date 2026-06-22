@@ -520,6 +520,7 @@ class DRLAOControlSystem:
                 gamma=0.99,
                 gae_lambda=0.95,
                 clip_range=0.2,
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -532,6 +533,7 @@ class DRLAOControlSystem:
                 batch_size=64,
                 ent_coef='auto',
                 target_entropy='auto',
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -544,6 +546,7 @@ class DRLAOControlSystem:
                 batch_size=64,
                 policy_delay=2,
                 target_policy_noise=0.2,
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -554,6 +557,7 @@ class DRLAOControlSystem:
                 learning_rate=3e-4,
                 buffer_size=10000,
                 batch_size=64,
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -566,6 +570,7 @@ class DRLAOControlSystem:
                 batch_size=64,
                 n_epochs=10,
                 gamma=0.99,
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -576,6 +581,7 @@ class DRLAOControlSystem:
                 learning_rate=3e-4,
                 buffer_size=10000,
                 batch_size=64,
+                policy_kwargs=policy_kwargs,
                 device=self.device,
                 verbose=1,
             )
@@ -644,12 +650,12 @@ class DRLAOControlSystem:
         """评估策略"""
         episode_rewards = []
         for _ in range(num_episodes):
-            obs, _ = env.reset()
+            obs = env.reset()
             done = False
             episode_reward = 0
             while not done:
                 action, _ = self.model.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, _ = env.step(action)
+                obs, reward, terminated, truncated = env.step(action)
                 episode_reward += reward
                 done = terminated or truncated
             episode_rewards.append(episode_reward)
