@@ -362,7 +362,7 @@ class AOVideoGenerationCallback(BaseCallback):
         self.algorithm_name = algorithm_name
         self.reward_type = reward_type
         self.frames_bytes = []
-        self.reward_history = []
+        self.rewards_history = []
         self.residual_rms_history = []
         self.step_count = 0
 
@@ -427,13 +427,13 @@ class AOVideoGenerationCallback(BaseCallback):
             self.psf_in.set_data(frame_obs['psf_infocus'])
             self.psf_de.set_data(frame_obs['psf_defocus'])
             self.line_reward.set_data(range(len(self.reward_history)), self.reward_history)
-            self.linr_mse.set_data(range(len(self.residual_rms_history)), self.residual_rms_history)
+            self.line_mse.set_data(range(len(self.residual_rms_history)), self.residual_rms_history)
 
             self.psf_in.set_clim(vmin=0, vmax=frame_obs['psf_infocus'].max())
             self.psf_de.set_clim(vmin=0, vmax=frame_obs['psf_defocus'].max())
 
             self.fig.canvas.draw()
-            self.frame_bytes.append(bytes(self.fig.canvas.buffer_rgba()))
+            self.frames_bytes.append(bytes(self.fig.canvas.buffer_rgba()))
 
             self.step_count += 1
             if self.step_count % 10 == 0 or self.step_count == self.num_steps:
@@ -801,10 +801,10 @@ if __name__ == "__main__":
     # best_model_path = main_parallel_training()
 
     # 模式二：观测
-      video_path = main_observation_mode(
+    video_path = main_observation_mode(
           algorithm='PPO',
           num_zernike=15,
           reward_type='hybrid',
           num_steps=1000
-      )
+    )
     
