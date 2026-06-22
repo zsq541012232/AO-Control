@@ -94,7 +94,7 @@ class DynamicAOEnvironment:
 
         # 配置离焦相差
         defocus_basis = hc.make_zernike_basis(3, self.pupil_diameter, self.pupil_grid, starting_mode=4)
-        self.defocus_phase = defocus_basis[0] * 2.0
+        self.defocus_phase = defocus_basis[0] * 2.0  # 施加2弧度幅度的固定离焦
 
         # 初始化扩展目标
         self.extended_object = self._generate_extended_target()
