@@ -20,6 +20,7 @@ from matplotlib.animation import FFMpegWriter
 from stable_baselines3 import PPO, SAC, TD3, DDPG
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.evaluation import evaluate_policy
 import torch.nn as nn
 from model import ZernikeNet
 
@@ -631,7 +632,7 @@ class DRLAOControlSystem:
             self.model.learn(total_timesteps=remaining, reset_num_timesteps=False)
 
             # 评估
-            mean_reward, std_reward = self._evaluate_policy(vec_env, num_episodes=5)
+            mean_reward, std_reward = self.evaluate_policy(self.model, vec_env, n_eval_episodes=5)
             logger.info(f"Timestep {step + remaining}: Mean reward: {mean_reward:.3f} ± {std_reward:.3f}")
 
             # 保存最佳模型
