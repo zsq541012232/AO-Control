@@ -327,6 +327,69 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
 
     print(f">>> 数据集生成完毕，成功存盘至：{out_dir}\n")
 
+
+# ========================================================
+# 3.1 扩展目标仿真数据收集（Extended Target Data Collection）
+# ========================================================
+def do_extended_target_data_collection(num_frames=500, save_path="./dataset/ao_simulated_extended"):
+    """
+    生成扩展目标仿真数据：保存卷积后的在焦/离焦图像及对应的 Zernike 系数。
+    与点源数据不同，此函数用于训练基于扩展目标（如卫星表面、十字靶标）的波前传感器。
+    """
+    env = DynamicAOEnvironment(pupil_grid_size=128, num_zernike=15)
+    print("\n>>> 开始收集扩展目标（卷积图像）仿真数据...")
+    out_dir = save_path
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 维持一个模拟的 DM 当前指令（泽尼克相位系数）
+    dm_commands = np.zeros(env.num_zernike)
+
+    for frame in range(num_frames):
+        # 推进环境：此时相机拍到的，是经过 DM 校正后的残差光场与扩展目标的卷积结果
+        obs, truth = env.step(dm_commands=dm_commands)
+        idx = frame + 1
+
+        # 保存扩展目标图像（卷积后）
+        # 注意：这里保存的是 obs['img_infocus'] 而非 obs['psf_infocus']
+        Image.fromarray(_to_uint8_image(obs['img_infocus']), mode='L').save(
+            os.path.join(out_dir, f"imgIF{idx}.jpg")
+        )
+        Image.fromarray(_to_uint8_image(obs['img_defocus']), mode='L').save(
+            os.path.join(out_dir, f"imgPoDF{idx}.jpg")
+        )
+        np.savetxt(
+            os.path.join(out_dir, f"Zernike{idx}.csv"),
+            truth['residual_zernike'],
+            delimiter=","
+        )
+
+        # 为下一帧设计“教学场景”（制造多样化的训练分布），逻辑与点源数据收集保持一致
+        rand_scenario = np.random.rand()
+
+        if rand_scenario < 0.2:
+            # 场景A（20%概率）：纯开环状态
+            dm_commands = np.zeros(env.num_zernike)
+        elif rand_scenario < 0.6:
+            # 场景B（40%概率）：模拟健康的闭环收敛中间态
+            gain = np.random.uniform(0.3, 0.9)
+            dm_commands = dm_commands - gain * truth['residual_zernike']
+        elif rand_scenario < 0.8:
+            # 场景C（20%概率）：模拟预测错误/发散边缘
+            noise = np.random.normal(0, 0.4, env.num_zernike)
+            gain = np.random.uniform(0.1, 0.5)
+            dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
+        else:
+            # 场景D（20%概率）：彻底发散与灾难恢复
+            massive_chaos = np.random.normal(0, 1.5, env.num_zernike)
+            dm_commands = massive_chaos
+
+        if (frame + 1) % 100 == 0:
+            print(f"已生成{frame + 1} / {num_frames}帧扩展目标数据...")
+
+    print(f">>> 扩展目标数据集生成完毕，成功存盘至：{out_dir}\n")
+
+
+
 # ========================================================
 # 4. 实时闭环交互验证与监控视频生成（Closed-Loop & Video）
 # ========================================================
