@@ -266,13 +266,16 @@ def _to_uint8_image(img):
         img = img / vmax
     return (img * 255.0).astype(np.uint8)
 
-def do_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated"):
+def do_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated", rich=False):
     """
     生成丰富化的仿真数据：包含开环大气扰动、闭环微小残差、以及发散边缘的随机畸变。
     以此解决因“分布偏移”导致的闭环发散问题。
     """
     env = DynamicAOEnvironment(pupil_grid_size=128, num_zernike=15)
-    print("\n>>> 开始收集抗发散的丰富化仿真数据...")
+    if True == rich:
+        print("\n>>> 开始收集抗发散的丰富化仿真数据...")
+    else:
+        print("\n>>> 开始收集开环仿真数据...")
     out_dir = save_path
     os.makedirs(out_dir, exist_ok=True)
 
@@ -296,31 +299,34 @@ def do_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simu
             delimiter=","
         )
 
-        # 为下一帧设计“教学场景”（制造多样化的训练分布）
-        rand_scenario = np.random.rand()
-
-        if rand_scenario < 0.2:
-            # 场景A（20%概率）：纯开环状态
-            # 强制指令归零，让模型学习应对原始的大尺度大气湍流
+        if False == rich:
             dm_commands = np.zeros(env.num_zernike)
-        elif rand_scenario < 0.6:
-            # 场景B（40%概率）：模拟健康的闭环收敛中间态
-            # 利用当前真值做一次带随机增益的控制，制造各种微小残差的图像
-            gain = np.random.uniform(0.3,0.9)
-            # 理想控制律：新指令 = 旧指令 - 增益*测量的残差误差
-            dm_commands = dm_commands - gain * truth['residual_zernike']
-        elif rand_scenario < 0.8:
-            # 场景C（20%概率）：模拟预测错误/发散边缘
-            # 故意注入随机的泽尼克噪声，强迫模型见识“越校越歪”的情况并学习纠偏
-            noise = np.random.normal(0,0.4,env.num_zernike)
-            gain = np.random.uniform(0.1,0.5)
-            dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
         else:
-            # 场景D（20%概率）：彻底发散与灾难恢复（Loos of Lock）
-            # 无视当前收敛状态，直接向DM注入幅值极大的随机畸变（标准差1.5）
-            # 此时焦面上的图像大概率已经完全碎裂，强迫模型学习如何从混沌中找回梯度
-            massive_chaos = np.random.normal(0,1.5,env.num_zernike)
-            dm_commands = massive_chaos
+            # 为下一帧设计“教学场景”（制造多样化的训练分布）
+            rand_scenario = np.random.rand()
+
+            if rand_scenario < 0.2:
+                # 场景A（20%概率）：纯开环状态
+                # 强制指令归零，让模型学习应对原始的大尺度大气湍流
+                dm_commands = np.zeros(env.num_zernike)
+            elif rand_scenario < 0.6:
+                # 场景B（40%概率）：模拟健康的闭环收敛中间态
+                # 利用当前真值做一次带随机增益的控制，制造各种微小残差的图像
+                gain = np.random.uniform(0.3,0.9)
+                # 理想控制律：新指令 = 旧指令 - 增益*测量的残差误差
+                dm_commands = dm_commands - gain * truth['residual_zernike']
+            elif rand_scenario < 0.8:
+                # 场景C（20%概率）：模拟预测错误/发散边缘
+                # 故意注入随机的泽尼克噪声，强迫模型见识“越校越歪”的情况并学习纠偏
+                noise = np.random.normal(0,0.4,env.num_zernike)
+                gain = np.random.uniform(0.1,0.5)
+                dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
+            else:
+                # 场景D（20%概率）：彻底发散与灾难恢复（Loos of Lock）
+                # 无视当前收敛状态，直接向DM注入幅值极大的随机畸变（标准差1.5）
+                # 此时焦面上的图像大概率已经完全碎裂，强迫模型学习如何从混沌中找回梯度
+                massive_chaos = np.random.normal(0,1.5,env.num_zernike)
+                dm_commands = massive_chaos
 
         if (frame + 1) % 100 == 0:
             print(f"已生成{frame + 1} / {num_frames}帧数据...")
@@ -331,7 +337,7 @@ def do_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simu
 # ========================================================
 # 3.1 扩展目标仿真数据收集（Extended Target Data Collection）
 # ========================================================
-def do_extended_target_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated_extended"):
+def do_extended_target_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated_extended", rich=False):
     """
     生成扩展目标仿真数据：保存卷积后的在焦/离焦图像及对应的 Zernike 系数。
     与点源数据不同，此函数用于训练基于扩展目标（如卫星表面、十字靶标）的波前传感器。
@@ -363,25 +369,28 @@ def do_extended_target_data_collection(start_idx=1, num_frames=500, save_path=".
             delimiter=","
         )
 
-        # 为下一帧设计“教学场景”（制造多样化的训练分布），逻辑与点源数据收集保持一致
-        rand_scenario = np.random.rand()
-
-        if rand_scenario < 0.2:
-            # 场景A（20%概率）：纯开环状态
+        if False == rich:
             dm_commands = np.zeros(env.num_zernike)
-        elif rand_scenario < 0.6:
-            # 场景B（40%概率）：模拟健康的闭环收敛中间态
-            gain = np.random.uniform(0.3, 0.9)
-            dm_commands = dm_commands - gain * truth['residual_zernike']
-        elif rand_scenario < 0.8:
-            # 场景C（20%概率）：模拟预测错误/发散边缘
-            noise = np.random.normal(0, 0.4, env.num_zernike)
-            gain = np.random.uniform(0.1, 0.5)
-            dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
         else:
-            # 场景D（20%概率）：彻底发散与灾难恢复
-            massive_chaos = np.random.normal(0, 1.5, env.num_zernike)
-            dm_commands = massive_chaos
+            # 为下一帧设计“教学场景”（制造多样化的训练分布），逻辑与点源数据收集保持一致
+            rand_scenario = np.random.rand()
+
+            if rand_scenario < 0.2:
+                # 场景A（20%概率）：纯开环状态
+                dm_commands = np.zeros(env.num_zernike)
+            elif rand_scenario < 0.6:
+                # 场景B（40%概率）：模拟健康的闭环收敛中间态
+                gain = np.random.uniform(0.3, 0.9)
+                dm_commands = dm_commands - gain * truth['residual_zernike']
+            elif rand_scenario < 0.8:
+                # 场景C（20%概率）：模拟预测错误/发散边缘
+                noise = np.random.normal(0, 0.4, env.num_zernike)
+                gain = np.random.uniform(0.1, 0.5)
+                dm_commands = dm_commands - gain * truth['residual_zernike'] + noise
+            else:
+                # 场景D（20%概率）：彻底发散与灾难恢复
+                massive_chaos = np.random.normal(0, 1.5, env.num_zernike)
+                dm_commands = massive_chaos
 
         if (frame + 1) % 100 == 0:
             print(f"已生成{frame + 1} / {num_frames}帧扩展目标数据...")
