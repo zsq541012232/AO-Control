@@ -266,7 +266,7 @@ def _to_uint8_image(img):
         img = img / vmax
     return (img * 255.0).astype(np.uint8)
 
-def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
+def do_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated"):
     """
     生成丰富化的仿真数据：包含开环大气扰动、闭环微小残差、以及发散边缘的随机畸变。
     以此解决因“分布偏移”导致的闭环发散问题。
@@ -282,7 +282,7 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
     for frame in range(num_frames):
         # 推进环境：此时相机拍到的，是经过 DM 校正后的残差光场
         obs, truth = env.step(dm_commands=dm_commands)
-        idx = frame + 1
+        idx = frame + start_idx
 
         Image.fromarray(_to_uint8_image(obs['psf_infocus']), mode='L').save(
             os.path.join(out_dir, f"imgIF{idx}.jpg")
@@ -331,7 +331,7 @@ def do_data_collection(num_frames=500, save_path="./dataset/ao_simulated"):
 # ========================================================
 # 3.1 扩展目标仿真数据收集（Extended Target Data Collection）
 # ========================================================
-def do_extended_target_data_collection(num_frames=500, save_path="./dataset/ao_simulated_extended"):
+def do_extended_target_data_collection(start_idx=1, num_frames=500, save_path="./dataset/ao_simulated_extended"):
     """
     生成扩展目标仿真数据：保存卷积后的在焦/离焦图像及对应的 Zernike 系数。
     与点源数据不同，此函数用于训练基于扩展目标（如卫星表面、十字靶标）的波前传感器。
@@ -347,7 +347,7 @@ def do_extended_target_data_collection(num_frames=500, save_path="./dataset/ao_s
     for frame in range(num_frames):
         # 推进环境：此时相机拍到的，是经过 DM 校正后的残差光场与扩展目标的卷积结果
         obs, truth = env.step(dm_commands=dm_commands)
-        idx = frame + 1
+        idx = frame + start_idx
 
         # 保存扩展目标图像（卷积后）
         # 注意：这里保存的是 obs['img_infocus'] 而非 obs['psf_infocus']
