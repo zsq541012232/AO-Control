@@ -7,7 +7,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-
+import subprocess
+import math
 
 # ========================================================
 # 1. 基础神经网络组件 (含 CBAM & DoubleConv)
@@ -320,6 +321,16 @@ class MetricTracker:
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)
         plt.close()
+
+
+def compute_lcm(x, y):
+    """ 计算最小公倍数，用于兼容较老 Python 版本的 GridSpec 布局计算 """
+    greater = max(x, y)
+    while True:
+        if (greater % x == 0) and (greater % y == 0):
+            return greater
+        greater += 1
+
 
 
 def plot_diagnostic_panel(inputs, target, pred, epoch, save_dir):
