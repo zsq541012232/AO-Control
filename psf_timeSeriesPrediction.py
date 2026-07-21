@@ -333,40 +333,119 @@ def compute_lcm(x, y):
 
 
 
-def plot_diagnostic_panel(inputs, target, pred, epoch, save_dir):
-    """ 时序画廊 + 真值对比 + 绝对残差热力图 """
+与 Gemini 对话
+我想保存结果的时候，不只保存第一张对比图，而且我想把结果图用ffmpeg串成视频。而且我感觉现在的结果图的布局不好看，请帮我优化
+
+为了实现保存所有验证集结果、自动生成视频以及优化图片布局的目标，我们需要对原代码的第 6、7 和 8 部分进行调整。  
+PY
+
+考虑到环境的稳定性和兼容性，我为你设计了以下优化方案：
+
+最小公倍数 (LCM) 布局法：原代码使用简单的切分导致底部的三个图（真值、预测、误差）在 5 个输入帧的宽度下难以对齐。我使用 GridSpec 结合最小公倍数技巧，确保两排输入图（5列）和一排结果图（3列）能完美居中对齐。  
+PY
+
+误差图色牢度：绝对误差通常为正数，将原代码的 coolwarm（适合展示正负偏差） 替换为 magma 或 Reds 并设定 vmin=0，能更直观地反映误差。  
+PY
+
+原生 FFmpeg 调度：不引入额外的视频处理库，直接使用 Python 原生的 subprocess 调用系统环境下的 FFmpeg 进行视频合成。
+
+请将原代码中的 第 6、7、8 部分 替换为以下代码：
+
+替换代码：第6、7、8部分
+Python
+import subprocess
+import math
+
+# ========================================================
+# 6. 强化可视化工具与视频合成
+# ========================================================
+class MetricTracker:
+    """ 训练指标曲线跟踪与自动画图器 """
+    def __init__(self):
+        self.history = {"train_loss": [], "train_psnr": [], "val_loss": [], "val_psnr": [], "val_ssim": []}
+
+    def update(self, t_loss, t_psnr, v_loss, v_psnr, v_ssim):
+        for key, val in zip(self.history.keys(), [t_loss, t_psnr, v_loss, v_psnr, v_ssim]):
+            if isinstance(val, torch.Tensor):
+                val = val.detach().cpu().item()
+            self.history[key].append(val)
+
+    def plot_curves(self, save_path):
+        epochs = range(1, len(self.history["train_loss"]) + 1)
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # Loss
+        axes[0].plot(epochs, self.history["train_loss"], label="Train Loss", color="RoyalBlue")
+        axes[0].plot(epochs, self.history["val_loss"], label="Val Loss", color="Tomato", linestyle="--")
+        axes[0].set_title("Loss Convergence Curve")
+        axes[0].set_xlabel("Epochs"), axes[0].set_ylabel("Loss")
+        axes[0].grid(True), axes[0].legend()
+
+        # PSNR
+        axes[1].plot(epochs, self.history["train_psnr"], label="Train PSNR", color="RoyalBlue")
+        axes[1].plot(epochs, self.history["val_psnr"], label="Val PSNR", color="Tomato", linestyle="--")
+        axes[1].set_title("PSNR History (dB)")
+        axes[1].set_xlabel("Epochs"), axes[1].set_ylabel("PSNR")
+        axes[1].grid(True), axes[1].legend()
+
+        # SSIM
+        axes[2].plot(epochs, self.history["val_ssim"], label="Val SSIM", color="ForestGreen")
+        axes[2].set_title("Validation SSIM Evolution")
+        axes[2].set_xlabel("Epochs"), axes[2].set_ylabel("SSIM")
+        axes[2].grid(True), axes[2].legend()
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+
+
+def compute_lcm(x, y):
+    """ 计算最小公倍数，用于兼容较老 Python 版本的 GridSpec 布局计算 """
+    greater = max(x, y)
+    while True:
+        if (greater % x == 0) and (greater % y == 0):
+            return greater
+        greater += 1
+
+
+def plot_diagnostic_panel(inputs, target, pred, epoch, sample_idx, save_dir):
+    """ 优化后的时序画廊 + 真值对比 + 绝对残差热力图 """
     os.makedirs(save_dir, exist_ok=True)
     seq_len = inputs.shape[0]
     
-    fig = plt.figure(figsize=(15, 10))
-    gs = fig.add_gridspec(3, seq_len)
+    # 动态计算网格列数以实现完美对齐 (例如：输入5帧，结果3张图，取LCM=15列)
+    total_cols = compute_lcm(seq_len, 3)
+    span_seq = total_cols // seq_len
+    span_res = total_cols // 3
+
+    fig = plt.figure(figsize=(16, 9))
+    # 为底部结果图分配更多的高度比例
+    gs = fig.add_gridspec(3, total_cols, height_ratios=[1, 1, 1.3])
 
     # 1. 在焦历史帧
     for t in range(seq_len):
-        ax = fig.add_subplot(gs[0, t])
+        ax = fig.add_subplot(gs[0, t*span_seq : (t+1)*span_seq])
         ax.imshow(inputs[t, 0].cpu().numpy(), cmap='inferno')
-        ax.set_title(f"Input IF (t-{seq_len-1-t})")
+        ax.set_title(f"Input IF (t-{seq_len-1-t})", fontsize=10)
         ax.axis('off')
 
     # 2. 离焦历史帧
     for t in range(seq_len):
-        ax = fig.add_subplot(gs[1, t])
+        ax = fig.add_subplot(gs[1, t*span_seq : (t+1)*span_seq])
         ax.imshow(inputs[t, 1].cpu().numpy(), cmap='inferno')
-        ax.set_title(f"Input PoDF (t-{seq_len-1-t})")
+        ax.set_title(f"Input PoDF (t-{seq_len-1-t})", fontsize=10)
         ax.axis('off')
 
     # 3. 三合一诊断图
-    col_w = max(1, seq_len // 3)
-    
     # 真值
-    ax_gt = fig.add_subplot(gs[2, 0:col_w])
+    ax_gt = fig.add_subplot(gs[2, 0*span_res : 1*span_res])
     im_gt = ax_gt.imshow(target[0].cpu().numpy(), cmap='inferno')
     ax_gt.set_title("Ground Truth (t+1)")
     ax_gt.axis('off')
     plt.colorbar(im_gt, ax=ax_gt, fraction=0.046, pad=0.04)
 
     # 预测
-    ax_pd = fig.add_subplot(gs[2, col_w:2*col_w])
+    ax_pd = fig.add_subplot(gs[2, 1*span_res : 2*span_res])
     im_pd = ax_pd.imshow(pred[0].cpu().numpy(), cmap='inferno')
     psnr_v = calc_psnr(pred.unsqueeze(0), target.unsqueeze(0))
     ssim_v = calc_ssim(pred.unsqueeze(0), target.unsqueeze(0))
@@ -374,17 +453,45 @@ def plot_diagnostic_panel(inputs, target, pred, epoch, save_dir):
     ax_pd.axis('off')
     plt.colorbar(im_pd, ax=ax_pd, fraction=0.046, pad=0.04)
 
-    # 绝对残差分布
-    ax_er = fig.add_subplot(gs[2, 2*col_w:])
+    # 绝对残差分布 (优化色带，设定 vmin=0 明确展示绝对误差)
+    ax_er = fig.add_subplot(gs[2, 2*span_res : 3*span_res])
     err_map = torch.abs(pred[0] - target[0]).cpu().numpy()
-    im_er = ax_er.imshow(err_map, cmap='coolwarm')
+    im_er = ax_er.imshow(err_map, cmap='magma', vmin=0)
     ax_er.set_title("Absolute Error Map")
     ax_er.axis('off')
     plt.colorbar(im_er, ax=ax_er, fraction=0.046, pad=0.04)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"epoch_{epoch}_diagnostic.png"), dpi=150, bbox_inches='tight')
+    # 使用四位数字填充，保证 ffmpeg 能够正确按顺序读取
+    plt.savefig(os.path.join(save_dir, f"epoch_{epoch}_sample_{sample_idx:04d}.png"), dpi=150, bbox_inches='tight')
     plt.close()
+
+
+def create_ffmpeg_video(image_dir, epoch, fps=10):
+    """ 调用系统 FFmpeg 将图片串成视频 """
+    video_path = os.path.join(image_dir, f"epoch_{epoch}_results.mp4")
+    # 构建适配 FFmpeg 的图片序列格式字符串
+    img_pattern = os.path.join(image_dir, f"epoch_{epoch}_sample_%04d.png")
+
+    cmd = [
+        "ffmpeg", 
+        "-y",                     # 覆盖已存在的文件
+        "-framerate", str(fps),   # 帧率设定
+        "-i", img_pattern,        # 输入序列
+        "-c:v", "libx264",        # H.264 编码，兼容性最好
+        "-pix_fmt", "yuv420p",    # 保证在大部分播放器中可以正常显示
+        video_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"    🎬 视频已成功生成: {video_path}")
+    except FileNotFoundError:
+        print("    ⚠️ 未找到 FFmpeg，请确保它已安装并添加到系统环境变量 (Path) 中。")
+    except subprocess.CalledProcessError as e:
+        print(f"    ⚠️ FFmpeg 视频生成失败 (退出码 {e.returncode})。")
+
+
 
 
 # ========================================================
@@ -422,9 +529,16 @@ def evaluate(model, loader, criterion, device, epoch=0, save_dir=None):
         total_psnr += calc_psnr(pred, y)
         total_ssim += calc_ssim(pred, y)
 
-        if save_first and save_dir is not None:
-            plot_diagnostic_panel(x[0], y[0], pred[0], epoch, save_dir)
-            save_first = False
+        if save_dir is not None:
+            if save_all:
+                # 遍历 batch 内所有样本进行保存
+                for b in range(x.size(0)):
+                    plot_diagnostic_panel(x[b], y[b], pred[b], epoch, sample_idx, save_dir)
+                    sample_idx += 1
+            elif save_first:
+                # 训练中途只存每轮的第一个样本
+                plot_diagnostic_panel(x[0], y[0], pred[0], epoch, 0, save_dir)
+                save_first = False
 
     return total_loss / len(loader), total_psnr / len(loader), total_ssim / len(loader)
 
@@ -483,7 +597,7 @@ def main():
     print(f"\n>>> 开始训练，共 {cfg['num_epochs']} 轮...")
     for epoch in range(1, cfg["num_epochs"] + 1):
         train_loss, train_psnr = train_one_epoch(model, train_loader, criterion, optimizer, cfg["device"])
-        val_loss, val_psnr, val_ssim = evaluate(model, val_loader, criterion, cfg["device"], epoch, cfg["vis_save_dir"])
+        val_loss, val_psnr, val_ssim = evaluate(model, val_loader, criterion, cfg["device"], epoch, cfg["vis_save_dir"], save_all=False)
         scheduler.step()
 
         # 记录指标并绘制曲线
@@ -504,6 +618,18 @@ def main():
             torch.save(model.state_dict(), os.path.join(cfg["weight_save_dir"], f"epoch_{epoch}.pth"))
 
     print("\n>>> 训练成功完成！")
+
+    print(">>> 开始利用最优模型生成验证集完整演变视频...")
+    # 加载最佳权重
+    best_model_path = os.path.join(cfg["weight_save_dir"], "model_best.pth")
+    if os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path))
+    
+    # 保存所有的验证集预测图片 (save_all=True)
+    evaluate(model, val_loader, criterion, cfg["device"], epoch="best", save_dir=cfg["vis_save_dir"], save_all=True)
+    
+    # 合成视频 (帧率设定为 5 fps 方便观察)
+    create_ffmpeg_video(cfg["vis_save_dir"], epoch="best", fps=5)
 
 
 if __name__ == "__main__":
