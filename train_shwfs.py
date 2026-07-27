@@ -7,9 +7,33 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-
+import glob
+from sklearn.model_selection import train_test_split
 import matplotlib 
 matplotlib.use('Agg')
+
+
+
+def split_dataset(data_dir, test_size=0.1, val_size=0.1):
+    """
+    扫描目录并划分数据集索引 (固定随机种子 random_state=42 保证每次划分一致)
+    """
+    print(">>> [Step 1] 扫描目录中的 CSV 文件...")
+    csv_files = glob.glob(os.path.join(data_dir, "Zernike*.csv"))[cite: 3]
+    
+    # 提取文件编号，兼容 Zernike0001.csv 这种补零格式
+    indices = [int(os.path.basename(f).replace("Zernike", "").replace(".csv", "")) for f in csv_files][cite: 3]
+    print(f"    共找到 {len(indices)} 个样本.")
+
+    # 第一次划分：分出训练集和 (验证+测试) 临时集
+    train_idx, temp_idx = train_test_split(indices, test_size=(test_size + val_size), random_state=42)[cite: 3]
+    
+    # 第二次划分：将临时集平分为验证集和测试集
+    val_idx, test_idx = train_test_split(temp_idx, test_size=0.5, random_state=42)[cite: 3]
+    
+    print(f"    数据集划分完成: Train={len(train_idx)}, Val={len(val_idx)}, Test={len(test_idx)}")
+    return train_idx, val_idx, test_idx[cite: 3]
+
 
 
 class ConvBnReLU(nn.Module):
@@ -129,7 +153,7 @@ class ZernikeNet(nn.Module):
 # 1. 自定义哈特曼数据集 Dataset 类
 # ==========================================
 class SHWFSDataset(Dataset):
-    def __init__(self, data_dir, num_samples, num_zernike=15, transform=None):
+    def __init__(self, data_dir, indices, num_zernike=15, transform=None):
         """
         初始化数据集
         :param data_dir: 图像和标签的文件夹路径
@@ -138,16 +162,16 @@ class SHWFSDataset(Dataset):
         :param transform: 图像预处理
         """
         self.data_dir = data_dir
-        self.num_samples = num_samples
+        self.indices = indices
         self.num_zernike = num_zernike
         self.transform = transform
 
     def __len__(self):
-        return self.num_samples
+        return len(self.indices)
 
     def __getitem__(self, idx):
         # 索引通常从 1 开始
-        file_idx = idx + 1
+        file_idx = self.indices[idx]
         
         # 组装图片名格式: image0001.jpg, image0002.jpg ... (符合 image%04d.jpg)
         # 如果您的图片是 image   1.jpg (空格填充), 可以改为 f"image{file_idx:4d}.jpg"
@@ -182,7 +206,6 @@ class SHWFSDataset(Dataset):
 def train_and_test():
     # --- 超参数配置 ---
     DATA_DIR = "./dataset/shwfs_data"  # 替换为您的数据路径
-    NUM_SAMPLES = 5000                 # 您拥有的图像总数
     NUM_ZERNIKE = 15                   # Zernike 阶数
     BATCH_SIZE = 16                    # 批次大小 (480x480 比较吃显存，建议设小一点)
     EPOCHS = 50                        # 训练轮次
@@ -201,11 +224,9 @@ def train_and_test():
 
     # --- 数据加载与划分 ---
     print(">>> 正在加载数据集...")
-    full_dataset = SHWFSDataset(DATA_DIR, num_samples=NUM_SAMPLES, num_zernike=NUM_ZERNIKE, transform=transform)
-    
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    train_idx, val_idx, test_idx = split_dataset(DATA_DIR, test_size=0.1, val_size=0.1)
+    train_dataset = SHWFSDataset(DATA_DIR, indices=train_idx, num_zernike=NUM_ZERNIKE, transform=transform)
+    val_dataset = SHWFSDataset(DATA_DIR, indices=val_idx, num_zernike=NUM_ZERNIKE, transform=transform)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
@@ -239,7 +260,7 @@ def train_and_test():
             
             running_loss += loss.item() * images.size(0)
             
-        epoch_train_loss = running_loss / train_size
+        epoch_train_loss = running_loss / len(train_loader)
         train_losses.append(epoch_train_loss)
 
         # --- 验证循环 ---
@@ -252,7 +273,7 @@ def train_and_test():
                 loss = criterion(outputs, labels)
                 val_loss += loss.item() * images.size(0)
                 
-        epoch_val_loss = val_loss / val_size
+        epoch_val_loss = val_loss / len(val_loader)
         val_losses.append(epoch_val_loss)
         
         # 调整学习率
