@@ -11,15 +11,15 @@ import seaborn as sns
 from sklearn.metrics import r2_score, mean_squared_error
 from torchvision import transforms
 from torch.utils.data import DataLoader
+import glob
+from sklearn.model_selection import train_test_split
 
 # 从您的训练脚本中导入模型和数据集类
 from train_shwfs import ZernikeNet, SHWFSDataset
 
 plt.style.use('seaborn-v0_8-paper')
-sns.set_context("talk')
-                
-import glob
-from sklearn.model_selection import train_test_split
+sns.set_context("talk")
+
 
 def split_dataset(data_dir, test_size=0.1, val_size=0.1):
     """
@@ -47,7 +47,6 @@ def test_and_plot_shwfs():
     # --- 1. 参数配置 ---
     # ==========================================
     test_dir = "./dataset/shwfs_data"  # 测试集数据路径
-    num_samples = 1000                 # 要测试的样本总数（可根据实际情况修改）
     num_modes = 15                     # Zernike 阶数
     batch_size = 16
     num_visualize = 10                 # 设定要单独绘制对比图和保存SHWFS图的样本数量
@@ -63,7 +62,8 @@ def test_and_plot_shwfs():
     ])
 
     print(f">>> 正在从 {test_dir} 加载测试数据...")
-    test_dataset = SHWFSDataset(data_dir=test_dir, num_samples=num_samples, num_zernike=num_modes, transform=transform)
+    _, _, test_idx = split_dataset(test_dir, test_size=0.1, val_size=0.1)
+    test_dataset = SHWFSDataset(data_dir=test_dir, indices=test_idx, num_zernike=num_modes, transform=transform)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # --- 2. 加载模型 ---
@@ -82,7 +82,7 @@ def test_and_plot_shwfs():
     all_preds, all_trues, all_latencies = [], [], []
     all_imgs = [] 
     
-    print(f">>> 开始对 {num_samples} 个样本进行推理分析 (设备: {device})...")
+    print(f">>> 开始对 {len(test_loader)} 个样本进行推理分析 (设备: {device})...")
 
     # GPU 预热
     if device.type == 'cuda':
